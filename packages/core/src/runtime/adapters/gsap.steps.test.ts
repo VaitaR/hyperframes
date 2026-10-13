@@ -482,3 +482,87 @@ describe("re-rendering leaves the rest as the seek left it", () => {
     expect(timeline.duration()).toBe(20);
   });
 });
+
+describe("gsap adapter after overlapping tweens on one property end", () => {
+  // A banner word drifts until 0.92 s while its exit ends at 0.9 s: a frame between the two ends
+  // must not leave the drift's end on screen. Seeking every frame in order matches a direct seek.
+  function banner() {
+    const word = document.body.appendChild(document.createElement("div"));
+    const timeline = gsap.timeline({ paused: true });
+    timeline.to(word, { x: -40, duration: 0.7, ease: "none" }, 0.22);
+    timeline.to(word, { x: 2200, duration: 0.2, ease: "expo.in" }, 0.7);
+    timeline.set({}, {}, 2);
+    const adapter = createGsapAdapter({
+      getTimeline: () => timeline as unknown as RuntimeTimelineLike,
+    });
+    return { adapter, x: () => gsap.getProperty(word, "x") };
+  }
+
+  it.each([24, 30, 50, 60])(
+    "shows the exit's end on every frame after both end at %s fps",
+    (fps) => {
+      const film = banner();
+      for (let frame = 0; frame <= 2 * fps; frame++) {
+        film.adapter.seek({ time: frame / fps });
+        if (frame / fps >= 0.92) expect(film.x(), `frame ${frame}`).toBe(2200);
+      }
+    },
+  );
+
+  it("matches a direct seek after a frame lands between the two ends", () => {
+    const film = banner();
+    for (const time of [0.85, 0.91, 0.95]) film.adapter.seek({ time });
+    const direct = banner();
+    direct.adapter.seek({ time: 0.95 });
+    expect(film.x()).toBe(direct.x());
+  });
+
+  // Starts 0.5 ms before a frame: the redraw from 1 ms below that frame crossed its start.
+  it("keeps a fromTo's from-only opacity on every frame of a sweep that a later set hides", () => {
+    const bar = document.body.appendChild(document.createElement("div"));
+    bar.style.opacity = "0";
+    const timeline = gsap.timeline({ paused: true });
+    timeline.fromTo(
+      bar,
+      { x: 1920, opacity: 1 },
+      { x: -320, duration: 0.34, ease: "power2.inOut", immediateRender: false },
+      0.4995,
+    );
+    timeline.set(bar, { opacity: 0 }, 0.85);
+    timeline.set({}, {}, 2);
+    const adapter = createGsapAdapter({
+      getTimeline: () => timeline as unknown as RuntimeTimelineLike,
+    });
+    const shown: string[] = [];
+    for (let frame = 0; frame <= 60; frame++) {
+      adapter.seek({ time: frame / 30 });
+      if (frame / 30 > 0.51 && frame / 30 < 0.84) shown.push(bar.style.opacity);
+    }
+    expect(new Set(shown)).toEqual(new Set(["1"]));
+    expect(bar.style.opacity).toBe("0");
+  });
+
+  it("keeps a repeatRefresh tween's relative repeats as playback does", () => {
+    const film = () => {
+      const box = { x: 0 };
+      const timeline = gsap.timeline({ paused: true });
+      timeline.to(
+        box,
+        { x: "+=50", duration: 0.3, repeat: 5, repeatRefresh: true, ease: "none" },
+        0.2,
+      );
+      timeline.set({}, {}, 3);
+      return { box, timeline };
+    };
+    const played = film();
+    const seeked = film();
+    const adapter = createGsapAdapter({
+      getTimeline: () => seeked.timeline as unknown as RuntimeTimelineLike,
+    });
+    for (let frame = 0; frame <= 90; frame++) {
+      played.timeline.totalTime(frame / 30);
+      adapter.seek({ time: frame / 30 });
+    }
+    expect(seeked.box.x).toBe(played.box.x);
+  });
+});

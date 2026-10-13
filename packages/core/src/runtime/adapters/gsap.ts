@@ -5,8 +5,10 @@ type GsapAdapterDeps = {
 };
 
 /**
- * Re-renders a timeline already at `t`, silently, from just below (above at 0) so same-time steps apply in authored
- * order. That step skips a keyframed tween at its start and undoes a tween's from-values there, so both are redone.
+ * Re-renders a timeline already at `t`, silently, from 0 (just above at 0) so tweens apply in authored order, as a
+ * direct seek would: same-time steps, and a finished tween whose end an earlier, longer tween on the same property
+ * overwrote. That step skips a keyframed tween at its start and undoes from-values, so both are redone. A timeline
+ * with `repeatRefresh` steps from just below `t` instead, since replaying its repeats re-reads their values.
  */
 export function rerenderGsapTimelineAt(
   timeline: {
@@ -32,8 +34,9 @@ export function rerenderGsapTimelineAt(
   );
   for (const [child] of skipped) child._ts = 0;
   try {
-    timeline.totalTime(t >= 0.001 ? t - 0.001 : t + 0.001, true);
-    primeTweensStartingAt(children, t);
+    const fromZero = !(timeline.getChildren?.(true, true, true) ?? []).some(refreshesRepeats);
+    timeline.totalTime(t < 0.001 ? t + 0.001 : fromZero ? 0 : t - 0.001, true);
+    primeTweensStartingAt(children, t, fromZero);
     timeline.totalTime(t, true);
   } finally {
     for (const [child, timeScale] of skipped) child._ts = timeScale;
@@ -105,6 +108,9 @@ type GsapAnimation = {
 
 const BELOW_GSAP_TIME_RESOLUTION = 2e-8;
 
+const refreshesRepeats = (child: unknown): boolean =>
+  Boolean((child as { vars?: { repeatRefresh?: unknown } }).vars?.repeatRefresh);
+
 const playsForward = (value: unknown): value is GsapAnimation => {
   const animation = value as GsapAnimation | null;
   return (
@@ -126,14 +132,24 @@ function primedAtItsStart(tween: GsapAnimation): boolean {
   return Boolean(tween.vars?.keyframes || tween._startAt);
 }
 
-function primeTweensStartingAt(children: unknown[], time: number): void {
+// The step to 0 undid the from-values of every tween that had started.
+function redoFromValues(tween: GsapAnimation): void {
+  if (tween._startAt) tween._startAt.render(BELOW_GSAP_TIME_RESOLUTION, true, true);
+}
+
+function primeTweensStartingAt(children: unknown[], time: number, fromZero: boolean): void {
   for (const child of children.filter(playsForward)) {
     const local = (time - child.startTime()) * child.timeScale();
     if (Math.abs(local) < 1e-9 && primedAtItsStart(child)) continue;
-    const nested = child.getChildren ? child : child.timeline;
-    if (nested?.getChildren && local > 0 && local <= child.totalDuration()) {
-      primeTweensStartingAt(nested.getChildren(false, true, true), local);
-    }
+    if (local > 0) primeStartedTween(child, local, fromZero);
+  }
+}
+
+function primeStartedTween(child: GsapAnimation, local: number, fromZero: boolean): void {
+  if (fromZero) redoFromValues(child);
+  const nested = child.getChildren ? child : child.timeline;
+  if (nested?.getChildren && local <= child.totalDuration()) {
+    primeTweensStartingAt(nested.getChildren(false, true, true), local, fromZero);
   }
 }
 
